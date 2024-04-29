@@ -1,0 +1,266 @@
+import pandas as pd
+from collections import defaultdict
+from tabulate import tabulate
+
+# Toggle settings
+apply_draw = True  # Toggle for applying drawing
+draw_rate = 0.00500  # Draw rate for applicable loans, set to 0 to disable
+
+apply_cpr = True   # Toggle for applying CPR
+monthly_cpr = 0.175 # Conditional Prepayment Rate, set to 0 to disable
+monthly_smm = 1-((1-monthly_cpr)**(1/12))
+
+re_amortize = True  # Set to True to re-amortize, set to False for static P&I, ###ONLY TURN ON IF OTHER TOOGLES ABOVE ARE USED###
+
+apply_dq = True  # Set to True to apply DQ, set to False to ignore DQ
+dq_multiplier = 1.00  # Adjust as needed
+
+apply_recovery = True  # Toggle for applying recovery
+monthly_recovery_rate = 0.60  # Recovery rate for delinquent amounts, adjust as needed
+
+apply_wac_adjustment = True  # Set to True to apply WAC Adjustment
+desired_wac = 0.1075  # Desired Weighted Average Coupon rate
+
+apply_loan_amount_adjustment = True  # New toggle for loan amount adjustment
+target_total_principal = 250000000  # Example: $250MM as the target total principal for adjustment
+
+keep_specific_number_of_loans = False  # Toggle to keep a specific number of loans for testing
+number_of_loans_to_keep = 10  # Number of loans to keep
+
+
+# --- Step 1: Load Data ---
+# Load the loan data and delinquency (DQ) schedule data from CSV files
+loan_data = pd.read_csv('/Users/estebandelsolar/Desktop/Python_Files/csv_files/March_2024_Prod.csv', low_memory=False)
+dq_schedule = pd.read_csv('/Users/estebandelsolar/Desktop/Python_Files/csv_files/dq_schedule.csv', low_memory=False)
+
+# Filter to only keep FIGURE_HELOC loan_program rows
+loan_data = loan_data[loan_data['loan_program'] == 'FIGURE_HELOC']
+
+# Apply filter to keep a specific number of loans, based on the toggle
+if keep_specific_number_of_loans:
+    loan_data = loan_data.head(number_of_loans_to_keep)
+
+#Adjust dates for uniformity 
+date_format = '%m/%d/%y'  # Format for dates like '01/24/24'
+
+loan_data['orig_date'] = pd.to_datetime(loan_data['orig_date'], format=date_format)
+loan_data['borrower_orig_fico_dt'] = pd.to_datetime(loan_data['borrower_orig_fico_dt'], format=date_format)
+loan_data['cutoff_date'] = pd.to_datetime(loan_data['cutoff_date'], format=date_format)
+
+# Step 2: Create DQ Lookup
+# Apply multiplier to DQ schedule
+dq_schedule['dq_rate'] *= dq_multiplier
+
+dq_lookup = defaultdict(dict)
+for idx, row in dq_schedule.iterrows():
+    if not pd.isna(row['original_term']) and not pd.isna(row['month']):
+        dq_lookup[int(row['original_term'])][int(row['month'])] = row['dq_rate']
+
+# Step 3: Add Draw Period
+draw_period_lookup = {60: 24, 120: 36, 180: 48, 360: 60}
+loan_data['ElapsedMonths'] = loan_data['original_loan_term'] - loan_data['rterm']
+loan_data['MaxDrawPeriod'] = loan_data['original_loan_term'].map(draw_period_lookup)
+loan_data['DrawStartMonth'] = 0
+loan_data['RemainingDrawPeriod'] = loan_data['MaxDrawPeriod'] - loan_data['ElapsedMonths']
+loan_data['DrawEndMonth'] = loan_data['RemainingDrawPeriod'] - 1
+
+# Step 4: Filter Invalid Loans and create a separate copy
+valid_loans = loan_data[(loan_data['rterm'] > 0) & (loan_data['original_interest_rate'] > 0) & (loan_data['prin_bal'] > 0)].copy() ##!INPUT!##
+
+# Step 4.1: WAC Adjustment Function
+# Calculate the current WAC
+total_weighted_interest = (valid_loans['prin_bal'] * valid_loans['original_interest_rate']).sum()
+total_principal = valid_loans['prin_bal'].sum()
+current_wac = total_weighted_interest / total_principal
+print(f"Current WAC: {current_wac:.4f}")
+
+def adjust_rates_for_wac_analytically(loans, desired_wac):
+    # Calculate the current total weighted interest
+    total_weighted_interest = (loans['prin_bal'] * loans['original_interest_rate']).sum()
+    
+    # Calculate the total principal balance
+    total_principal = loans['prin_bal'].sum()
+
+    # Calculate the required adjustment to reach the desired WAC
+    total_required_adjustment = (desired_wac * total_principal) - total_weighted_interest
+
+    # Calculate the uniform adjustment per dollar of principal
+    adjustment_per_dollar = total_required_adjustment / total_principal
+
+    # Apply this adjustment uniformly to each loan's interest rate
+    loans['original_interest_rate'] += adjustment_per_dollar
+    loans['original_interest_rate'] = loans['original_interest_rate'].round(4)
+
+    # Calculate and print the new WAC after adjustment
+    new_total_weighted_interest = (loans['prin_bal'] * loans['original_interest_rate']).sum()
+    new_wac = new_total_weighted_interest / total_principal
+    print(f"New WAC after adjustment: {new_wac:.4f}")
+
+    return loans
+
+# Apply the analytical WAC adjustment
+if apply_wac_adjustment:
+    valid_loans = adjust_rates_for_wac_analytically(valid_loans, desired_wac=desired_wac)
+    valid_loans['adjusted_interest_rate'] = valid_loans['original_interest_rate']
+
+# Create 'adjusted_interest_rate' column
+valid_loans['adjusted_interest_rate'] = valid_loans['original_interest_rate']
+
+# Step 4.2: Print total original and principal balances before adjustment
+total_orig_bal_before = loan_data['original_loan_bal'].sum()
+total_prin_bal_before = loan_data['prin_bal'].sum()
+print(f"Total Original Balance Before Adjustment: ${total_orig_bal_before:,.2f}")
+print(f"Total Principal Balance Before Adjustment: ${total_prin_bal_before:,.2f}")
+
+# Loan Amount Adjustment Function
+def adjust_loan_amounts_uniformly(loans, target_total):
+    current_total_principal = loans['prin_bal'].sum()
+    scaling_factor = target_total / current_total_principal
+    loans['adjusted_prin_bal'] = loans['prin_bal'] * scaling_factor
+    loans['adjusted_orig_bal'] = loans['original_loan_bal'] * scaling_factor
+    return loans
+
+# Apply the loan amount adjustment
+if apply_loan_amount_adjustment:
+    valid_loans = adjust_loan_amounts_uniformly(valid_loans, target_total_principal)
+
+    # Print total adjusted original and principal balances after adjustment
+    total_adj_orig_bal_after = valid_loans['adjusted_orig_bal'].sum()
+    total_adj_prin_bal_after = valid_loans['adjusted_prin_bal'].sum()
+    print(f"Total Adjusted Original Balance After Adjustment: ${total_adj_orig_bal_after:,.2f}")
+    print(f"Total Adjusted Principal Balance After Adjustment: ${total_adj_prin_bal_after:,.2f}")
+
+
+# Step 5: Define Calculation Function
+def calculate_amortization_schedule(loan):
+    # Use global variables for configurable parameters
+    global apply_recovery, apply_dq, apply_loan_amount_adjustment, apply_cpr, apply_draw, monthly_smm, draw_rate, monthly_recovery_rate
+    
+    if apply_loan_amount_adjustment:
+        loan_amount = round(loan['adjusted_prin_bal'], 2)
+        original_loan_bal = round(loan['adjusted_orig_bal'], 2)
+    else:
+        loan_amount = round(loan['prin_bal'], 2)
+        original_loan_bal = round(loan['original_loan_bal'], 2)
+    
+    annual_interest_rate = loan['adjusted_interest_rate']  # Uses 'adjusted_interest_rate'
+    total_months = loan['rterm']
+    draw_start_month = loan['DrawStartMonth']
+    draw_end_month = loan['DrawEndMonth']
+    original_term = loan['original_loan_term']
+    loan_program = loan['loan_program']
+    monthly_interest_rate = annual_interest_rate / 12
+    monthly_payment = round(loan_amount * (monthly_interest_rate / (1 - (1 + monthly_interest_rate) ** -total_months)), 2) if total_months > 0 else 0
+    prev_delinquent_amount = 0 
+    # serv_fee_percent = loan['servicing_fee_rate']
+
+
+    monthly_schedule = []
+    # Ensure integer type for 'total_months' and 'draw_end_month' before using them in a range function
+    for month in range(int(max(total_months, draw_end_month)) + 1):
+
+        # Conditional calculation of real_month based on re_amortize toggle
+        if re_amortize and month > 1:
+            real_month = original_term - (total_months) +1
+            if month == total_months  and loan_amount < monthly_payment:
+                    monthly_payment = round(loan_amount) + ((loan_amount) * monthly_interest_rate)
+
+            # Recalculate P&I if re-amortization is enabled and it’s not the first month
+        if re_amortize and month > 1:
+            total_months = total_months -1  # Decrease the total months remaining
+            monthly_payment = round(loan_amount * (monthly_interest_rate / (1 - (1 + monthly_interest_rate) ** -total_months)), 2) if total_months > 0 else 0
+        else:
+            real_month = original_term - total_months + month    
+
+        if month == 0:
+            monthly_schedule.append([month, loan_amount, 0, 0, 0, 0, 0, 0, 0, loan_amount, loan_program,
+            total_months, original_term, annual_interest_rate, 0, 0, 0,
+            draw_start_month, draw_end_month, real_month, original_loan_bal])
+            continue
+
+        draw_amount = 0  
+        if month <= draw_end_month and loan_program == 'FIGURE_HELOC':
+            max_draw_amount = max(0, original_loan_bal - loan_amount)
+            draw_amount = round(min(max_draw_amount, max_draw_amount * draw_rate), 2)
+        
+        if apply_dq and month > 6:  
+            nearest_original_term = min(dq_lookup.keys(), key=lambda x: abs(x - original_term) if x >= original_term else float('inf'))
+            dq_rate = dq_lookup.get(nearest_original_term, {}).get(real_month, 0)
+        else:
+            dq_rate = 0
+        
+        delinquent_amount = round(original_loan_bal * dq_rate, 2)
+        monthly_interest = round(max(0, loan_amount * monthly_interest_rate), 2)
+        adjusted_delinquent_amount = round(delinquent_amount if apply_dq else 0, 2)
+        prev_delinquent_amount = adjusted_delinquent_amount
+        recovery_amount = round(prev_delinquent_amount * monthly_recovery_rate, 2) if month > 0 and apply_recovery else 0
+        principal = round(max(0, monthly_payment - monthly_interest - adjusted_delinquent_amount), 2) if monthly_interest != 0 else 0
+        
+        prepayment = 0
+        prepayment = round((loan_amount-principal) * monthly_smm, 2) if loan_amount > 0 and month > 0 else 0
+        
+        if loan_amount <= monthly_payment:
+            monthly_payment = loan_amount + monthly_interest
+            principal = loan_amount  
+        
+
+        loan_amount = round(max(0, loan_amount - principal - prepayment + draw_amount - adjusted_delinquent_amount), 2)
+        monthly_schedule.append([month, loan_amount, monthly_payment, monthly_interest, principal,
+        prepayment, delinquent_amount, recovery_amount, draw_amount, loan_amount, loan_program,
+        total_months, original_term, annual_interest_rate, real_month, dq_rate, monthly_smm, draw_rate,
+        draw_start_month, draw_end_month, original_loan_bal, total_months, 
+        ])
+
+        if loan_amount < .1 and (not re_amortize or total_months <= 0):
+            break
+
+    
+    columns = [
+        'Month', 'Beginning Balance', 'Monthly Payment', 'Interest', 'Principal',
+        'Prepayment', 'Delinquent Amount', 'Recovery Amount', 'Redraw Amount', 'Ending Balance', 'Loan Program',
+        'Remaining Term', 'Original Term', 'Original Interest Rate', 'Real Month', 'Monthly DQ Rate', 'SMM', 'Draw Rate',
+        'Draw Start Month', 'Draw End Month', 'Original Loan Balance', 'Total Months', 
+    ]
+    return pd.DataFrame(monthly_schedule, columns=columns)
+
+# Step 6: Apply Calculation Function
+all_schedules = []
+for idx, loan in valid_loans.iterrows():
+    loan_schedule = calculate_amortization_schedule(loan)
+    loan_schedule['loan_id'] = loan['loan_id']
+    all_schedules.append(loan_schedule)
+
+# Step 7: Concatenate Schedules
+concatenated_schedules = pd.concat(all_schedules, ignore_index=True)
+
+# Step 8: Aggregate Data
+aggregated_data = concatenated_schedules.groupby('Month').agg({
+    'Beginning Balance': 'sum',
+    'Monthly Payment': 'sum',
+    'Interest': 'sum',
+    'Principal': 'sum',
+    'Prepayment': 'sum',
+    'Delinquent Amount': 'sum',
+    'Recovery Amount': 'sum',
+    'Redraw Amount': 'sum',
+    'Ending Balance': 'sum'
+}).reset_index()
+aggregated_data['Total Payment'] = aggregated_data['Monthly Payment'] + aggregated_data['Prepayment']
+
+# --- Step 9: Output Results ---
+
+# Format sample results
+formatted_concatenated_schedules = concatenated_schedules.head().apply(lambda x: f"{x:,.2f}" if isinstance(x, (float, int)) else x)
+
+# Print sample results and save full results to CSV
+print("\nSample Results:")
+print(tabulate(formatted_concatenated_schedules, headers='keys', tablefmt='pretty'))
+concatenated_schedules.to_csv('/Users/estebandelsolar/Desktop/Python_Files/outputs/2024_March_Prod.csv', index=False)
+
+# Format aggregated data sample
+formatted_aggregated_data = aggregated_data.head().apply(lambda x: f"{x:,.2f}" if isinstance(x, (float, int)) else x)
+
+# Print aggregated data sample and save aggregated data to CSV
+print("\nAggregated Data Sample:")
+print(tabulate(formatted_aggregated_data, headers='keys', tablefmt='pretty'))
+aggregated_data.to_csv('/Users/estebandelsolar/Desktop/Python_Files/outputs/2024_March_Prod_Agg.csv', index=False)
