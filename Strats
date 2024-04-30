@@ -1,0 +1,584 @@
+import pandas as pd
+import numpy as np
+from tabulate import tabulate
+from datetime import datetime
+import warnings
+
+# Load the loan data
+loan_data = pd.read_csv('/Users/estebandelsolar/Downloads/HEL03012024 - ABS_HE1.csv', low_memory=False)
+
+# Date format for consistency
+date_format = '%m/%d/%y'  # Format for dates like '01/24/24'
+
+# Converting date columns
+loan_data['orig_date'] = pd.to_datetime(loan_data['orig_date'], format=date_format)
+loan_data['borrower_orig_fico_dt'] = pd.to_datetime(loan_data['borrower_orig_fico_dt'], format=date_format)
+loan_data['cutoff_date'] = pd.to_datetime(loan_data['cutoff_date'], format=date_format)
+
+# Filter out loans
+# loan_data = loan_data[loan_data['loan_status'] != 'PAID_CLOSED']
+# loan_data = loan_data[loan_data['loan_status'] != 'TRANSFERRED']
+# loan_data = loan_data[loan_data['loan_status'] != 'SERVICE_RELEASE']
+# loan_data = loan_data[loan_data['loan_status'] != 'FORECLOSED']
+# loan_data = loan_data[loan_data['loan_status'] != 'BANKRUPTCY']
+# loan_data = loan_data[loan_data['loan_status'] != 'CHARGEDOFF']
+# loan_data = loan_data[loan_data['loan_status'] != 'PAID_CHARGEOFF']
+# loan_data = loan_data[loan_data['loan_status'] != 'PAID_OPEN']
+# loan_data = loan_data[loan_data['servicing_transfer_date'].isna()]
+# loan_data = loan_data[loan_data['loan_program'] != 'DRAW']
+# loan_data = loan_data[loan_data['orig_date'] > '12/31/22']
+# loan_data = loan_data[loan_data['orig_date'] < '01/02/23']
+# loan_data = loan_data[loan_data['borrower_orig_fico_dt'] > '07/01/23']
+# loan_data = loan_data[loan_data['orig_credit_score'] >= 660]
+# loan_data = loan_data[loan_data['income_verified_months'] >= 6]
+# loan_data = loan_data[loan_data['property_type'] != 'CONDO']
+# loan_data = loan_data[loan_data['orig_date'].dt.year == 2019]
+
+from datetime import datetime
+
+# Calculate loan age in months
+loan_data['loan_age'] = ((loan_data['cutoff_date'].dt.year - loan_data['orig_date'].dt.year) * 12) + (loan_data['cutoff_date'].dt.month - loan_data['orig_date'].dt.month)
+
+# Ensure 'loan_age' and 'prin_bal' are numeric
+loan_data['loan_age'] = pd.to_numeric(loan_data['loan_age'], errors='coerce')
+loan_data['prin_bal'] = pd.to_numeric(loan_data['prin_bal'], errors='coerce')
+
+# Calculate remaining duration
+loan_data['remaining_duration'] = loan_data['original_loan_term'] - loan_data['loan_age']
+
+# Function to categorize Loan Amount
+def categorize_loan_amount(amount):
+    if amount > 350000:
+        return 'a. >350k'
+    elif 300000 < amount <= 350000:
+        return 'b. >300k-350k'
+    elif 200000 < amount <= 300000:
+        return 'c. >200k-300k'
+    elif 175000 < amount <= 200000:
+        return 'd. >175k-200k'
+    elif 150000 < amount <= 175000:
+        return 'e. >150k-175k'
+    elif 125000 < amount <= 150000:
+        return 'f. >125k-150k'
+    elif 100000 < amount <= 125000:
+        return 'g. >100k-125k'
+    elif 75000 < amount <= 100000:
+        return 'h. >75k-100k'
+    elif 50000 < amount <= 75000:
+        return 'i. >50k-75k'
+    elif 25000 < amount <= 50000:
+        return 'j. >25k-50k'
+    else:
+        return 'k. <=25k'
+
+# Function to categorize Origination Rate
+def categorize_orig_rate(rate):
+    if rate > .10:
+        return 'a. > .10%'
+    elif .090 < rate <= .10:
+        return 'b. 9.01% to 10.0%'
+    elif .080 < rate <= .09:
+        return 'c. 8.01% to 9.0%'
+    elif .070 < rate <= .08:
+        return 'd. 7.01% to 8.0%'
+    elif .060 < rate <= .070:
+        return 'e. 6.01% to 7.0%'
+    elif .050 < rate <= .060:
+        return 'f. 5.01% to 6.0%'
+    elif .040 < rate <= .050:
+        return 'g. 4.01% to 5.0%'
+    elif .030 < rate <= .040:
+        return 'h. 3.01% to 4.0%'
+    else:
+        return 'i. <= 3.0%'
+
+# Function to categorize Credit Score Bands
+def categorize_credit_score(score):
+    if score >= 800:
+        return 'a. >= 800'
+    elif 780 <= score <= 799:
+        return 'b. 780 to 799'
+    elif 760 <= score <= 779:
+        return 'c. 760 to 779'
+    elif 740 <= score <= 759:
+        return 'd. 740 to 759'
+    elif 720 <= score <= 739:
+        return 'e. 720 to 739'
+    elif 700 <= score <= 719:
+        return 'f. 700 to 719'
+    elif 680 <= score <= 699:
+        return 'g. 680 to 699'
+    elif 660 <= score <= 679:
+        return 'h. 660 to 679'
+    elif 640 <= score <= 659:
+        return 'i. 640 to 659'
+    elif 620 <= score <= 639:
+        return 'j. 620 to 639'
+    else:
+        return 'k. <620'
+    
+# Function to categorize CLTV Bands
+def categorize_CLTV(CLTV):
+    if CLTV > .95:
+        return 'a. CLTV > 95'
+    elif .90 < CLTV <= .95:
+        return 'b. >90 to 95'
+    elif .85 < CLTV <= .90:
+        return 'c. >85 to 90'
+    elif .80 < CLTV <= .85:
+        return 'd. >80 to 85'
+    elif .75 < CLTV <= .80:
+        return 'e. >75 to 80'
+    elif .70 < CLTV <= .75:
+        return 'f. >70 to 75'
+    elif .60 < CLTV <= .70:
+        return 'g. >60 to 70'
+    elif .50 < CLTV <= .60:
+        return 'h. >50 to 60'
+    elif .25 < CLTV <= .50:
+        return 'i. >25 to 50'
+    elif CLTV <= .25:
+        return 'j. <= 25'
+    else:
+        return 'k. Invalid Score'
+
+# Function to categorize Utilization Bands
+def categorize_utilization(utilization):
+    if utilization > 0.99:
+        return 'a. 99.1% to 100%'
+    elif 0.98 < utilization <= 0.99:
+        return 'b. 98.1% to 99%'
+    elif 0.90 < utilization <= 0.98:
+        return 'c. 90.1% to 98%'
+    elif 0.70 < utilization <= 0.90:
+        return 'd. 70.1% to 90%'
+    elif 0.50 < utilization <= 0.70:
+        return 'e. 50.1% to 70%'
+    elif 0.25 < utilization <= 0.50:
+        return 'f. 25.1% to 50%'
+    else:
+        return 'g. <=25%'
+    
+# Function to categorize DTI Bands    
+def categorize_dti(dti):
+    if dti > 0.45:
+        return 'a. > 45%'
+    elif 0.40 < dti <= 0.45:
+        return 'b. 40.1% to 45%'
+    elif 0.35 < dti <= 0.4:
+        return 'c. 35.1% to 40%'
+    elif 0.30 < dti <= 0.35:
+        return 'd. 30.1% to 35%'
+    elif 0.25 < dti <= 0.3:
+        return 'e. 25.1% to 30%'
+    elif 0.20 < dti <= 0.25:
+        return 'f. 20.1% to 25%'
+    elif 0.15 < dti <= 0.2:
+        return 'g. 15.1% to 20%'
+    elif 0.10 < dti <= 0.15:
+        return 'h. 10.1% to 15%'
+    else:
+        return 'i. <= 10%'
+
+# Function to categorize Purpose
+def categorize_purpose(purpose):
+    if purpose == 'Debt consolidation':
+        return 'a. Debt Consolidation'
+    elif purpose == 'Home improvement':
+        return 'b. Home Improvement'
+    elif purpose == 'Other purchase':
+        return 'c. Other Purchase'
+    elif purpose == 'Education':
+        return 'd. Education'
+    elif purpose == 'Major purchase':
+        return 'e. Major Purchase'
+    elif purpose == 'Health/Medical':
+        return 'f. Health/Medical'
+    elif purpose == 'Caring for family':
+        return 'g. Caring for Family'
+    elif purpose == 'Travel':
+        return 'h. Travel'
+    elif purpose == 'Retirement':
+        return 'i. Retirement'
+    elif purpose == 'Home Improvement (Small Business)':
+        return 'j. Home Improvement (Small Business)'
+    elif purpose == 'Small Business':
+        return 'k. Small Business'
+    else:
+        return 'l. Other'  # For any other purpose not specified
+    
+# Function to categorize Occupancy
+def categorize_occupancy(occupancy):
+    if occupancy == 'PRIMARY_RESIDENCE':
+        return 'a. Primary'
+    else:
+        return 'b. Non-Primary' 
+    
+# Function to categorize Term
+def categorize_orig_term(term):
+    if term == 360:
+        return 'a. 360 Months'
+    elif term == 180:
+        return 'b. 180 Months'
+    elif term == 120:
+        return 'c. 120 Months'
+    elif term == 60:
+        return 'd. 60 Months'
+    else:
+        return 'e. Other'  # For any other term not specified
+
+ # Function to categorize Lien   
+def categorize_lien(lien):
+    if lien == 1:
+        return 'a. 1'
+    elif lien == 2:
+        return 'b. 2'
+    elif lien == 3:
+        return 'c. 3'
+    else:
+        return 'd. Other'  # For any other value not specified
+    
+ # Function to categorize State    
+def categorize_state(state):
+    if state == 'CA':
+        return 'a. California'
+    elif state == 'FL':
+        return 'b. Florida'
+    elif state == 'GA':
+        return 'c. Georgia'
+    elif state == 'WA':
+        return 'd. Washington'
+    elif state == 'AZ':
+        return 'e. Arizona'
+    else:
+        return 'f. Other'  # For any other state not specified   
+
+ # Function to categorize CU Opt In
+def categorize_credit_union_opt_in(opt_in):
+    if opt_in == 'T':
+        return 'a. Opted In'
+    elif opt_in == 'F':
+        return 'b. Not Opted In'
+    else:
+        return 'b. Not Opted In'  # For any other value not specified    
+    
+ # Function to categorize Originator
+def categorize_originator(originator):
+    if originator == 'FIGURE':
+        return 'a. Figure'
+    elif originator != 'FIGURE':
+        return 'b. White Label'
+    
+ # Function to categorize IV Method
+def categorize_verification_method(method):
+    if method == 'PLAID_TRANSACTIONS':
+        return 'a. Plaid Transactions'
+    elif method == 'POINTSERV_TAX':
+        return 'b. Pointserv Tax'
+    elif method == 'POINTSERV_PAYROLL':
+        return 'c. Pointserv Payroll'
+    elif method == 'MANUAL_PAYSTUB':
+        return 'd. Manual Paystub'
+    elif method == 'PLAID_TRANSACTIONS, POINTSERV_PAYROLL':
+        return 'e. Plaid & Pointserv Payroll'
+    elif method == 'PLAID, PAYROLL, PAYSTUB':
+        return 'f. Plaid, Payroll, Paystub'
+    elif method == 'TRUEWORK_INSTANT':
+        return 'g. Truework Instant'
+    elif method == 'PAYROLL & PAYSTUBS':
+        return 'h. Payroll & Paystubs'
+    elif method == 'TAX & PAYSTUBS':
+        return 'i. Tax & Paystubs'
+    elif method == 'TAX & PAYROLL':
+        return 'j. Tax & Payroll'
+    elif method == 'PLAID & PAYSTUBS':
+        return 'k. Plaid & Paystubs'
+    else:
+        return 'l. Other'  # For any other method not specified
+    
+# Function to categorize IV Length
+def categorize_verification_length(length):
+    if length < 1:
+        return 'A. <1'
+    elif 1 <= length < 3:
+        return 'B. 1-3'
+    elif 3 <= length < 6:
+        return 'C. 3-6'
+    elif 6 <= length < 9:
+        return 'D. 6-9'
+    elif 9 <= length < 12:
+        return 'E. 9-12'
+    elif length == 12:
+        return 'F. 12'
+    else:
+        return 'G. >12'
+
+
+ # Function to categorize Credit Bucket
+def categorize_credit_bucket(credit_bucket):
+    if credit_bucket == 'Prime, High CLTV':
+        return 'a. Prime, High CLTV'
+    elif credit_bucket == 'Prime, Low CLTV':
+        return 'b. Prime, Low CLTV'
+    elif credit_bucket == 'NonPrime, Low CLTV':
+        return 'c. NonPrime, Low CLTV'
+    elif credit_bucket == 'NonPrime, High CLTV':
+        return 'd. NonPrime, High CLTV'
+    else:
+        return 'e. Other'  # For any other value not specified
+    
+# # Function to categorize Servicing Fee Percentages
+# def categorize_servicing_fee(fee_percent):
+#     if fee_percent <= 0.0025:
+#         return 'a. 0% to 0.25%'
+#     elif 0.0025 < fee_percent <= 0.0035:
+#         return 'b. 0.25% to 0.35%'
+#     elif 0.0035 < fee_percent <= 0.005:
+#         return 'c. 0.35% to 0.5%'
+#     elif 0.005 < fee_percent <= 0.01:
+#         return 'd. 0.5% to 1%'
+#     elif 0.01 < fee_percent <= 0.015:
+#         return 'e. 1% to 1.5%'
+#     else:
+#         return 'f. >1.5%'
+
+
+# Apply categorization functions
+loan_data['Loan Amount Band'] = loan_data['original_loan_bal'].apply(categorize_loan_amount)
+loan_data['Orig Rate Band'] = loan_data['current_interest_rate'].apply(categorize_orig_rate)
+loan_data['Credit Score Band'] = loan_data['orig_credit_score'].apply(categorize_credit_score)
+loan_data['CLTV Band'] = loan_data['original_cltv'].apply(categorize_CLTV)
+loan_data['Utilization Band'] = loan_data['acct_utilization'].apply(categorize_utilization)
+loan_data['DTI Band'] = loan_data['original_dti_rate'].apply(categorize_dti)
+loan_data['Purpose'] = loan_data['loan_purpose_type'].apply(categorize_purpose)
+loan_data['Occupancy'] = loan_data['occupancy_type'].apply(categorize_occupancy)
+loan_data['Term'] = loan_data['original_loan_term'].apply(categorize_orig_term)
+loan_data['Lien Position'] = loan_data['lien_position_granular'].apply(categorize_lien)
+loan_data['State'] = loan_data['property_state'].apply(categorize_state)
+loan_data['CU Opt In'] = loan_data['credit_union_membership'].apply(categorize_credit_union_opt_in)
+loan_data['Originator'] = loan_data['originator_name'].apply(categorize_originator)
+loan_data['IV Method'] = loan_data['verification_methods'].apply(categorize_verification_method)
+loan_data['IV Length'] = loan_data['income_verified_months'].apply(categorize_verification_length)
+loan_data['Credit Bucket'] = loan_data['credit_bucket'].apply(categorize_credit_bucket)
+# loan_data['Servicing Fee Category'] = loan_data['servicing_fee_rate'].apply(categorize_servicing_fee)
+
+# Create an empty list to store the grouped data DataFrames
+grouped_data_list = []
+
+# Create an empty list to store the grouped data DataFrames, including separators
+grouped_data_list_with_separators = []
+
+# Create an empty list to store the string representation of each table
+all_tables_as_strings = []
+
+# Create an empty list to store each DataFrame along with its header
+all_grouped_dataframes = []
+
+
+# Additional function to generate all breakouts for a column
+def generate_all_breakouts_for_column(column_name, all_possible_values, grouped_data):
+    """Generate a DataFrame that includes all possible breakouts for a given column."""
+    all_values_df = pd.DataFrame({column_name: all_possible_values})
+    merged_df = pd.merge(all_values_df, grouped_data, on=column_name, how="left")
+    merged_df.fillna({
+        'Count': 0,
+        'Original Bal': 0,
+        'Current Bal': 0,
+        'Rate': 0,
+        'FICO': 0,
+        '1st CLTV': 0,
+        'CLTV': 0,
+        'Util': 0,
+        'DTI': 0,
+        'Pct': 0,
+        'WALS': 0,
+        'WALA': 0,
+        'Remaining Duration': 0
+    }, inplace=True)
+    return merged_df
+
+# Function to calculate and print grouped data
+def calculate_and_append_grouped_data(grouping_column_name, all_possible_values):
+    agg_dict = {
+        'loan_id': 'count',
+        'original_loan_bal': 'sum',  # Assuming you want the sum here.
+        'prin_bal': 'sum',
+        'current_interest_rate': lambda x: np.average(loan_data.loc[x.index, 'current_interest_rate'], weights=loan_data.loc[x.index, 'prin_bal']),
+        'orig_credit_score': lambda x: np.average(loan_data.loc[x.index, 'orig_credit_score'], weights=loan_data.loc[x.index, 'prin_bal']),
+        'previous_cltv': lambda x: np.average(loan_data.loc[x.index, 'previous_cltv'], weights=loan_data.loc[x.index, 'prin_bal']),
+        'original_cltv': lambda x: np.average(loan_data.loc[x.index, 'original_cltv'], weights=loan_data.loc[x.index, 'prin_bal']),
+        'acct_utilization': lambda x: np.average(loan_data.loc[x.index, 'acct_utilization'], weights=loan_data.loc[x.index, 'prin_bal']),
+        'original_dti_rate': lambda x: np.average(loan_data.loc[x.index, 'original_dti_rate'], weights=loan_data.loc[x.index, 'prin_bal']),
+        'loan_age': lambda x: np.average(loan_data.loc[x.index, 'loan_age'], weights=loan_data.loc[x.index, 'prin_bal']),
+        'remaining_duration': lambda x: np.average(loan_data.loc[x.index, 'remaining_duration'], weights=loan_data.loc[x.index, 'prin_bal']),
+    }
+
+    grouped_data = loan_data.groupby(grouping_column_name).agg(agg_dict).reset_index()
+    grouped_data.columns = [
+        grouping_column_name, 'Count', 'Original Bal',
+        'Current Bal', 'Rate', 'FICO', '1st CLTV', 'CLTV', 'Util', 'DTI', 'WALA', 'Remaining Duration'
+    ]
+    grouped_data['Pct'] = (grouped_data['Original Bal'] / grouped_data['Original Bal'].sum()) * 100
+    grouped_data['WALS'] = grouped_data['Original Bal'] / grouped_data['Count']
+
+    weighted_avg_data = loan_data.groupby(grouping_column_name).apply(
+        lambda x: pd.Series({
+            '1st CLTV Weighted': np.divide((x['previous_cltv'] * x['prin_bal']).sum(), x['prin_bal'].sum() + 1e-10),
+            'CLTV Weighted': np.divide((x['original_cltv'] * x['prin_bal']).sum(), x['prin_bal'].sum() + 1e-10)
+        }), include_groups=False
+    ).reset_index()
+
+
+
+    
+    # Merge the weighted average data with the existing grouped_data
+    grouped_data = pd.merge(grouped_data, weighted_avg_data, on=grouping_column_name)
+    
+    # Add all possible breakouts
+    grouped_data = generate_all_breakouts_for_column(grouping_column_name, all_possible_values, grouped_data)
+
+    # Combine '1st CLTV' and '1st CLTV Weighted' into one column
+    grouped_data['1st CLTV'] = grouped_data['1st CLTV'].combine_first(grouped_data['1st CLTV Weighted'])
+    
+    # Combine 'CLTV' and 'CLTV Weighted' into one column
+    grouped_data['CLTV'] = grouped_data['CLTV'].combine_first(grouped_data['CLTV Weighted'])
+    
+    # Selecting the columns for the final DataFrame
+    grouped_data = grouped_data[[
+        grouping_column_name, 'Count', 'Original Bal',
+        'Current Bal', 'Pct', 'WALS', 'Rate', 'FICO', '1st CLTV', 'CLTV', 'Util', 'DTI', 'WALA', 'Remaining Duration'
+    ]]
+    
+    # Before defining total_row
+    figure_heloc_original_bal = loan_data.loc[loan_data['loan_program'] == 'FIGURE_HELOC', 'original_loan_bal'].sum()
+
+    # Calculating the 'Total' row and appending it to the DataFrame
+    total_row = pd.DataFrame({
+        grouping_column_name: ['Total'],
+        'Count': [grouped_data['Count'].sum()],
+        'Original Bal': [figure_heloc_original_bal],
+        'Current Bal': [grouped_data['Current Bal'].sum()],
+        'Pct': [100],  
+        'WALS': [grouped_data['Original Bal'].sum() / grouped_data['Count'].sum()],
+        'Rate': [(loan_data['current_interest_rate'] * loan_data['prin_bal']).sum() / loan_data['prin_bal'].sum()], 
+        'FICO': [(loan_data['orig_credit_score'] * loan_data['prin_bal']).sum() / loan_data['prin_bal'].sum()],
+        '1st CLTV': [(loan_data['previous_cltv'] * loan_data['prin_bal']).sum() / loan_data.loc[loan_data['previous_cltv'].notna(), 'prin_bal'].sum()],
+        'CLTV': [(loan_data['original_cltv'] * loan_data['prin_bal']).sum() / loan_data.loc[loan_data['original_cltv'].notna(), 'prin_bal'].sum()],
+        'Util': [(loan_data['acct_utilization'] * loan_data['prin_bal']).sum() / loan_data.loc[loan_data['acct_utilization'].notna(), 'prin_bal'].sum()],
+        'DTI': [(loan_data['original_dti_rate'] * loan_data['prin_bal']).sum() / loan_data.loc[loan_data['original_dti_rate'].notna(), 'prin_bal'].sum()],
+        'WALA': [(loan_data['loan_age'] * loan_data['prin_bal']).sum() / loan_data['prin_bal'].sum()],
+        'Remaining Duration': [(loan_data['remaining_duration'] * loan_data['prin_bal']).sum() / loan_data['prin_bal'].sum()]
+    })
+
+    grouped_data = pd.concat([grouped_data, total_row]).reset_index(drop=True)
+    
+    grouped_data['Rate'] = grouped_data['Rate'].apply(lambda x: f"{x:,.5f}")
+    cols_to_format = grouped_data.columns.difference(['Rate'])
+    # Copy the grouped_data to formatted_grouped_data
+    formatted_grouped_data = grouped_data.copy()
+
+    # Apply formatting to all columns except 'Rate' and 'Count'
+    cols_to_format = formatted_grouped_data.columns.difference(['Count'])
+    formatted_grouped_data[cols_to_format] = formatted_grouped_data[cols_to_format].apply(lambda col: col.apply(lambda x: f"{x:,.2f}" if isinstance(x, (float, int)) else x))
+
+      # Append the header and DataFrame to the list
+    header_df = pd.DataFrame({grouping_column_name: ["Grouped Data by " + grouping_column_name]})
+    all_grouped_dataframes.append(header_df)
+    all_grouped_dataframes.append(grouped_data)
+
+    # Instead of printing, append the table to the list
+    table_string = tabulate(formatted_grouped_data, headers='keys', tablefmt='grid', showindex=False)
+    all_tables_as_strings.append("\nGrouped Data by " + grouping_column_name + ":\n")
+    all_tables_as_strings.append(table_string)
+    
+    print("\nGrouped Data by " + grouping_column_name + ":")
+    print(tabulate(formatted_grouped_data, headers='keys', tablefmt='grid', showindex=False))
+
+# Call the function for each grouping
+calculate_and_append_grouped_data('Loan Amount Band', [
+    'a. >350k', 'b. >300k-350k', 'c. >200k-300k', 'd. >175k-200k', 
+    'e. >150k-175k', 'f. >125k-150k', 'g. >100k-125k', 'h. >75k-100k',
+    'i. >50k-75k', 'j. >25k-50k', 'k. <=25k'
+])
+
+calculate_and_append_grouped_data('Orig Rate Band', [
+    'a. > .10%', 'b. 9.01% to 10.0%', 'c. 8.01% to 9.0%', 'd. 7.01% to 8.0%',
+    'e. 6.01% to 7.0%', 'f. 5.01% to 6.0%', 'g. 4.01% to 5.0%', 'h. 3.01% to 4.0%', 'i. <= 3.0%'
+])
+
+calculate_and_append_grouped_data('Credit Score Band', [
+    'a. >= 800', 'b. 780 to 799', 'c. 760 to 779', 'd. 740 to 759', 'e. 720 to 739',
+    'f. 700 to 719', 'g. 680 to 699', 'h. 660 to 679', 'i. 640 to 659', 'j. 620 to 639', 'k. <620'
+])
+
+calculate_and_append_grouped_data('CLTV Band', [
+    'a. CLTV > 95', 'b. >90 to 95', 'c. >85 to 90', 'd. >80 to 85', 'e. >75 to 80',
+    'f. >70 to 75', 'g. >60 to 70', 'h. >50 to 60', 'i. >25 to 50', 'j. <= 25'
+])
+
+calculate_and_append_grouped_data('Utilization Band', [
+    'a. 99.1% to 100%', 'b. 98.1% to 99%', 'c. 90.1% to 98%', 'd. 70.1% to 90%',
+    'e. 50.1% to 70%', 'f. 25.1% to 50%', 'g. <=25%'
+])
+
+calculate_and_append_grouped_data('DTI Band', [
+    'a. > 45%', 'b. 40.1% to 45%', 'c. 35.1% to 40%', 'd. 30.1% to 35%',
+    'e. 25.1% to 30%', 'f. 20.1% to 25%', 'g. 15.1% to 20%', 'h. 10.1% to 15%', 'i. <= 10%'
+])
+
+calculate_and_append_grouped_data('Purpose', [
+    'a. Debt Consolidation', 'b. Home Improvement', 'c. Other Purchase', 'd. Education',
+    'e. Major Purchase', 'f. Health/Medical', 'g. Caring for Family', 'h. Travel',
+    'i. Retirement', 'j. Home Improvement (Small Business)', 'k. Small Business', 'l. Other'
+])
+
+calculate_and_append_grouped_data('Occupancy', ['a. Primary', 'b. Non-Primary'])
+
+calculate_and_append_grouped_data('Term', [
+    'a. 360 Months', 'b. 180 Months', 'c. 120 Months', 'd. 60 Months', 'e. Other'
+])
+
+calculate_and_append_grouped_data('Lien Position', ['a. 1', 'b. 2', 'c. 3', 'd. Other'])
+
+calculate_and_append_grouped_data('State', [
+    'a. California', 'b. Florida', 'c. Georgia', 'd. Washington', 'e. Arizona', 'f. Other'
+])
+
+calculate_and_append_grouped_data('CU Opt In', ['a. Opted In', 'b. Not Opted In'])
+
+calculate_and_append_grouped_data('Originator', ['a. Figure', 'b. White Label'])
+
+calculate_and_append_grouped_data('IV Method', [
+    'a. Plaid Transactions', 'b. Pointserv Tax', 'c. Pointserv Payroll', 'd. Manual Paystub',
+    'e. Plaid & Pointserv Payroll', 'f. Plaid, Payroll, Paystub', 'g. Truework Instant',
+    'h. Payroll & Paystubs', 'i. Tax & Paystubs', 'j. Tax & Payroll', 'k. Plaid & Paystubs', 'l. Other'
+])
+
+calculate_and_append_grouped_data('IV Length', [
+    'A. <1', 'B. 1-3', 'C. 3-6', 'D. 6-9', 'E. 9-12', 'F. 12', 'G. >12'
+])
+
+calculate_and_append_grouped_data('Credit Bucket', [
+    'a. Prime, High CLTV', 'b. Prime, Low CLTV', 'c. NonPrime, Low CLTV', 'd. NonPrime, High CLTV', 'e. Other'
+])
+
+# calculate_and_append_grouped_data('Servicing Fee Category', [
+#     'a. 0% to 0.25%', 'b. 0.25% to 0.35%', 'c. 0.35% to 0.5%', 'd. 0.5% to 1%', 'e. 1% to 1.5%',
+#     'f. >1.5%'
+# ])
+
+output_path = '/Users/estebandelsolar/Desktop/Python_Files/Outputs/Strats_04_26_24.csv'
+
+# Create a new file or overwrite the existing file
+with open(output_path, 'w') as file:
+    pass
+
+# Function to save each grouped data to the CSV
+def save_individual_grouped_data_to_csv(df, output_path):
+    with open(output_path, 'a') as file:
+        df.to_csv(file, index=False, header=True)
+        file.write('\n')
+
+# Iterate over the stored DataFrames and save them to the CSV
+for df in all_grouped_dataframes[1::2]:  # We only want every second dataframe which contains the data
+    save_individual_grouped_data_to_csv(df, output_path)
