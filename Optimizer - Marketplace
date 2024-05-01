@@ -1,0 +1,215 @@
+# Step 1: Import Libraries and Suppress Warnings
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import warnings
+
+# Suppress specific pandas FutureWarnings that are safe to ignore in this context
+warnings.filterwarnings('ignore', category=FutureWarning)
+
+
+# Step 2: Define Functions for Loan Data Analysis
+# 2.1 Calculate Loan Concentration Percentages
+def calculate_concentration_percentages(data, limits):
+    total_bal = data['prin_bal'].sum()
+    concentration_percentages = {}
+    for column, conditions in limits.items():
+        for condition, _ in conditions.items():
+            if '<' in condition:
+                threshold = float(condition[1:])
+                condition_met = data[column] < threshold
+            elif '>' in condition:
+                threshold = float(condition[1:])
+                condition_met = data[column] > threshold
+            else:
+                condition_met = data[column].astype(str) == condition
+            condition_bal = data.loc[condition_met, 'prin_bal'].sum() 
+            concentration_percentages[condition] = condition_bal / total_bal * 100
+    return concentration_percentages
+
+# 2.2 Adjust Loans to Meet Portfolio Criteria
+def adjust_loans_to_meet_criteria(data, concentration_limits, wa_limits, min_loans_threshold=None):
+    total_bal = data['prin_bal'].sum()
+    wa_metrics = {}
+    removed_loans = pd.DataFrame(columns=data.columns)
+
+    while True:
+        adjustments_made = False
+        
+        # Check and adjust for concentration limits
+        for column, conditions in concentration_limits.items():
+            for condition, limit_pct in conditions.items():
+                if '<' in condition:
+                    threshold = float(condition[1:])
+                    condition_met = data[column] < threshold
+                elif '>' in condition:
+                    threshold = float(condition[1:])
+                    condition_met = data[column] > threshold
+                else:
+                    condition_met = data[column].astype(str) == condition
+
+                condition_bal = data.loc[condition_met, 'prin_bal'].sum()
+                current_pct = condition_bal / total_bal
+
+                if current_pct > limit_pct:
+                    # Remove the loan that contributes the most to the breach of this limit
+                    loan_to_remove = data[condition_met].sort_values(by='prin_bal', ascending=False).iloc[0]
+                    # Track the removed loan
+                    removed_loans = pd.concat([removed_loans, data.loc[[loan_to_remove.name]]], ignore_index=True)
+                    data = data.drop(loan_to_remove.name)
+                    adjustments_made = True
+
+        # Recalculate totals after adjustments
+        total_bal = data['prin_bal'].sum()
+        
+        # Check and adjust for WA limits
+        for metric, target in wa_limits.items():
+            if metric in data.columns:
+                wa_metric_bal = (data[metric] * data['prin_bal']).sum()
+                wa_metric = wa_metric_bal / total_bal if total_bal != 0 else 0
+                
+                while (metric == 'orig_credit_score' and wa_metric < target) or (metric != 'orig_credit_score' and wa_metric > target):
+                    if metric == 'orig_credit_score':
+                        loan_to_remove = data.sort_values(by=metric, ascending=True).iloc[0]
+                    else:
+                        loan_to_remove = data.sort_values(by=metric, ascending=False).iloc[0]
+                    
+                    # Track the removed loan
+                    removed_loans = pd.concat([removed_loans, data.loc[[loan_to_remove.name]]], ignore_index=True)
+                    data = data.drop(loan_to_remove.name)
+                    adjustments_made = True
+
+                    total_bal = data['prin_bal'].sum()
+                    wa_metric_bal = (data[metric] * data['prin_bal']).sum()
+                    wa_metric = wa_metric_bal / total_bal if total_bal != 0 else 0
+
+        if not adjustments_made or (min_loans_threshold and len(data) < min_loans_threshold):
+            break
+
+    for metric in wa_limits.keys():
+        if metric in data.columns:
+            wa_metric_bal = (data[metric] * data['prin_bal']).sum()
+            wa_metrics[metric] = wa_metric_bal / total_bal if total_bal != 0 else 0
+
+    return data, wa_metrics, removed_loans 
+
+# Step 3: Load and Prepare Loan Data
+#3.1 Load Loan Data from CSV
+loan_data = pd.read_csv('/Users/estebandelsolar/Desktop/Python_Files/csv_files/January_HELOC_Production_Tape_2024.csv', low_memory=False)  # Update the path to your actual file location
+
+# Convert date columns to datetime format
+date_format = "%Y-%m-%d"
+loan_data['orig_date'] = pd.to_datetime(loan_data['orig_date'], format=date_format, errors='coerce')
+loan_data['borrower_orig_fico_dt'] = pd.to_datetime(loan_data['borrower_orig_fico_dt'], format=date_format, errors='coerce')
+loan_data['cutoff_date'] = pd.to_datetime(loan_data['cutoff_date'], format=date_format, errors='coerce')
+
+# Ensure 'prin_bal' and other relevant columns are numeric
+loan_data['prin_bal'] = pd.to_numeric(loan_data['prin_bal'], errors='coerce')
+loan_data['orig_credit_score'] = pd.to_numeric(loan_data['orig_credit_score'], errors='coerce')
+loan_data['original_cltv'] = pd.to_numeric(loan_data['original_cltv'], errors='coerce')
+loan_data['original_dti_rate'] = pd.to_numeric(loan_data['original_dti_rate'], errors='coerce')
+
+# Calculate the state with the highest total principal balance
+state_with_highest_balance = loan_data.groupby('property_state')['prin_bal'].sum().idxmax()
+
+# Step 4: Define Portfolio Adjustment Criteria
+# 4.1 Concentration Limits
+concentration_limits = {
+    'orig_credit_score': {
+        '<700': 0.30,
+        '<680': 0.15,
+    },
+    'original_cltv': {
+        '>0.80': 0.20,
+    },
+    'original_dti_rate': {
+        '>0.45': 0.30,
+    },
+    'lien_position_granular': {
+        '3+': 0.030,
+    },
+    'property_state': {
+        state_with_highest_balance: 0.10  # dynamically setting the state concentration limit
+    }
+}
+# 4.2 Weighted Average Limits
+wa_limits = {
+    'original_dti_rate': 0.40,  # Target WA DTI ratio
+    'original_cltv': 0.70,      # Target WA CLTV ratio
+    'orig_credit_score': 735    # Target WA FICO
+   
+}
+
+# Step 5: Analyze Initial Loan Portfolio
+#5.1 Calculate Initial Concentration and WA Metrics
+initial_concentration_percentages = calculate_concentration_percentages(loan_data, concentration_limits)
+
+initial_wa_metrics = {}
+total_initial_bal = loan_data['prin_bal'].sum()
+for metric, target in wa_limits.items():
+    if metric in loan_data.columns:
+        wa_metric_bal = (loan_data[metric] * loan_data['prin_bal']).sum()
+        initial_wa_metrics[metric] = wa_metric_bal / total_initial_bal if total_initial_bal != 0 else np.nan
+
+# Step 6: Adjust Loan Portfolio to Meet Criteria
+adjusted_loan_data, adjusted_wa_metrics, removed_loans = adjust_loans_to_meet_criteria(loan_data.copy(), concentration_limits, wa_limits)
+
+# Calculate new concentration percentages and WA metrics for adjusted data
+adjusted_concentration_percentages = calculate_concentration_percentages(adjusted_loan_data, concentration_limits)
+
+# Step 7: Print & Save Adjusted and Removed Loans to CSV Files
+# Display Initial Dataset Summary
+print("Initial Dataset Summary:")
+print(f"Number of Loans: {loan_data.shape[0]}")
+print(f"Total Balance of Included Loans: ${total_initial_bal:,.2f}")
+for metric, value in initial_wa_metrics.items():
+    print(f"Weighted Average {metric.replace('_', ' ').title()}: {value:.2f}")
+
+# Display Initial Concentration Percentages
+print("\nInitial Concentration Percentages:")
+for condition, pct in calculate_concentration_percentages(loan_data, concentration_limits).items():
+    print(f"{condition}: {pct:.2f}%")
+
+# Display Adjusted Dataset Summary
+print("\nAdjusted Dataset Summary:")
+print(f"Number of Loans: {adjusted_loan_data.shape[0]}")
+print(f"Total Balance of Included Loans: ${adjusted_loan_data['prin_bal'].sum():,.2f}")
+for metric, value in adjusted_wa_metrics.items():
+    print(f"Weighted Average {metric.replace('_', ' ').title()}: {value:.2f}")
+
+# Display New Concentration Percentages for Adjusted Data
+print("\nNew Concentration Percentages:")
+for condition, pct in adjusted_concentration_percentages.items():
+    print(f"{condition}: {pct:.2f}%")
+
+# Display Summary for Removed Loans
+if not removed_loans.empty:
+    total_removed_bal = removed_loans['prin_bal'].sum()
+    print("\nRemoved Loans Summary:")
+    print(f"Number of Removed Loans: {removed_loans.shape[0]}")
+    print(f"Total Balance of Removed Loans: ${total_removed_bal:,.2f}")
+    removed_wa_metrics = {}
+    for metric, target in wa_limits.items():
+        if metric in removed_loans.columns:
+            wa_metric_bal_removed = (removed_loans[metric] * removed_loans['prin_bal']).sum()
+            removed_wa_metrics[metric] = wa_metric_bal_removed / total_removed_bal if total_removed_bal != 0 else np.nan
+    for metric, value in removed_wa_metrics.items():
+        print(f"Weighted Average {metric.replace('_', ' ').title()}: {value:.2f}")
+    # Display Removed Loans Concentration Percentages
+    print("\nRemoved Loans Concentration Percentages:")
+    for condition, pct in calculate_concentration_percentages(removed_loans, concentration_limits).items():
+        print(f"{condition}: {pct:.2f}%")
+else:
+    print("\nRemoved Loans Summary:")
+    print("No loans were removed based on the criteria.")
+
+# Save the adjusted data to a new CSV
+output_filtered_csv_path = '/Users/estebandelsolar/Desktop/Python_Files/outputs/Adjusted_Loans.csv'
+adjusted_loan_data.to_csv(output_filtered_csv_path, index=False)
+print(f"Adjusted loans saved to {output_filtered_csv_path}")
+
+# Save the removed loans to another CSV
+removed_loans_csv_path = '/Users/estebandelsolar/Desktop/Python_Files/outputs/Removed_Loans.csv'
+removed_loans.to_csv(removed_loans_csv_path, index=False)
+print(f"Removed loans saved to {removed_loans_csv_path}")
+
