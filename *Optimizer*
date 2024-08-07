@@ -1,0 +1,459 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import warnings
+from tqdm import tqdm
+import time
+
+# Ignore FutureWarnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+
+# Load and Prepare Loan Data
+try:
+    # Load the loan data from a CSV file
+    loan_data = pd.read_csv('/Users/f1315/Downloads/HEL061024 - HE3_Internal_Piggyback.csv', low_memory=False)
+except Exception as e:
+    print(f"Error loading CSV file: {e}")
+    raise
+
+# Create a loan group identifier
+# This creates a unique group for loans with the same application_short_id
+loan_data['loan_group'] = loan_data.groupby('application_short_id').ngroup()
+
+# Calculate the state with the highest total principal balance
+# and set the property_state concentration limit
+state_with_highest_balance = loan_data.groupby('property_state')['prin_bal'].sum().idxmax()
+
+# Adjustable Criteria
+# Define the adjustable criteria for filtering and adjusting the loans
+absolute_prin_bal_limit = 271_000_000
+criteria = {
+    "concentration_limits": {
+        "orig_credit_score": {"<700": 0.25, "<680": 0.14},  # Credit score limits
+        "original_cltv": {">0.80": 0.13},  # CLTV limits
+        "lien_position_granular": {1: 0.00, 3: 0.00},  # Lien position limits
+        "property_state": {state_with_highest_balance: 0.25},  # Property state limit
+        "occupancy_type": {"NON_PRIMARY_RESIDENCE": 0.0727}  # Occupancy type limit
+    },
+    "wa_limits": {
+        "original_dti_rate": 0.38,  # Weighted average Debt-to-Income (DTI) rate limit
+        "original_cltv": 0.65,  # Weighted average CLTV limit
+        "orig_credit_score": 750,  # Weighted average credit score limit
+        "original_interest_rate": 0.1120,  # Weighted average interest rate limit
+    },
+    "min_loans_threshold": 1,  # Minimum number of loans required
+}
+
+def evaluate_condition(data, column, condition):
+    """
+    Evaluate a condition on a specific column in the DataFrame.
+    Supports '<' and '>' conditions for numeric comparison.
+
+    Parameters:
+    - data: DataFrame to evaluate
+    - column: Column to check the condition against
+    - condition: Condition to evaluate (e.g., '<700', '>0.80')
+
+    Returns:
+    - A boolean Series indicating which rows meet the condition
+    """
+    if isinstance(condition, str):
+        if '<' in condition:
+            return data[column] < float(condition[1:])
+        elif '>' in condition:
+            return data[column] > float(condition[1:])
+    return data[column] == condition
+
+def calculate_concentration_percentages(data, limits):
+    """
+    Calculate the concentration percentages for specified limits.
+
+    Parameters:
+    - data: DataFrame containing loan data
+    - limits: Dictionary specifying concentration limits
+
+    Returns:
+    - A dictionary with concentration percentages for each limit condition
+    """
+    total_bal = data['prin_bal'].sum()
+    return {f"{col}_{cond}": (data[evaluate_condition(data, col, cond)]['prin_bal'].sum() / total_bal) * 100
+            for col, cond_dict in limits.items()
+            for cond in cond_dict}
+
+def calculate_weighted_averages(data, wa_limits):
+    """
+    Calculate weighted averages for specified metrics.
+
+    Parameters:
+    - data: DataFrame containing loan data
+    - wa_limits: Dictionary specifying weighted average limits
+
+    Returns:
+    - A dictionary with weighted averages for each metric
+    """
+    total_bal = data['prin_bal'].sum()
+    return {metric: (data[metric] * data['prin_bal']).sum() / total_bal for metric in wa_limits}
+
+def criteria_satisfied(data, criteria):
+    """
+    Check if the loan data satisfies the specified criteria.
+
+    Parameters:
+    - data: DataFrame containing loan data
+    - criteria: Dictionary specifying criteria for concentration and weighted averages
+
+    Returns:
+    - True if criteria are satisfied, False otherwise
+    """
+    concentration_percentages = calculate_concentration_percentages(data, criteria['concentration_limits'])
+    wa_metrics = calculate_weighted_averages(data, criteria['wa_limits'])
+
+    # Check concentration limits
+    for col, cond_dict in criteria['concentration_limits'].items():
+        for cond, limit_pct in cond_dict.items():
+            if concentration_percentages[f"{col}_{cond}"] > limit_pct * 100:
+                return False
+
+    # Check weighted average limits
+    for metric, target in criteria['wa_limits'].items():
+        if 'score' in metric:
+            if wa_metrics[metric] < target:
+                return False
+        else:
+            if wa_metrics[metric] > target:
+                return False
+
+    return True
+
+def adjust_loans(data, criteria, total_bal_limit=absolute_prin_bal_limit, pbar=None):
+    """
+    Adjust the loan data to meet specified criteria, removing loans if necessary.
+
+    Parameters:
+    - data: DataFrame containing loan data
+    - criteria: Dictionary specifying criteria for adjustment
+    - total_bal_limit: Absolute principal balance limit
+    - pbar: Progress bar object for visual progress tracking
+
+    Returns:
+    - A tuple containing the adjusted data and removed loans
+    """
+    total_bal = data['prin_bal'].sum()
+    removed_loans = pd.DataFrame(columns=data.columns)
+    data.sort_values(by=['prin_bal'], ascending=False, inplace=True)
+
+    def remove_loan(loan):
+        """
+        Remove a loan from the dataset and update total balance.
+
+        Parameters:
+        - loan: Loan to be removed
+        """
+        nonlocal total_bal, removed_loans
+        loan_group = loan['loan_group']
+        group_loans = data[data['loan_group'] == loan_group]
+
+        # Add group of loans to removed loans
+        removed_loans = pd.concat([removed_loans, group_loans], ignore_index=True)
+
+        # Drop group of loans from the main dataset
+        data.drop(group_loans.index, inplace=True)
+
+        # Recalculate total balance
+        total_bal = data['prin_bal'].sum()
+        
+        # Update progress bar
+        if pbar is not None:
+            pbar.update(len(group_loans))
+
+    def enforce_limit(column, condition, limit_pct):
+        """
+        Enforce a limit by removing loans until the condition is met.
+
+        Parameters:
+        - column: Column to enforce the limit on
+        - condition: Condition to evaluate
+        - limit_pct: Percentage limit for the condition
+        """
+        nonlocal total_bal
+        while (data[evaluate_condition(data, column, condition)]['prin_bal'].sum() / total_bal) * 100 > limit_pct and total_bal > total_bal_limit:
+            loan_to_remove = data[evaluate_condition(data, column, condition)].sort_values(
+                by=['prin_bal'], ascending=False).iloc[0]
+            remove_loan(loan_to_remove)
+
+    def enforce_min_limit(column, condition, limit_pct):
+        """
+        Enforce a minimum limit by adding back loans until the condition is met.
+
+        Parameters:
+        - column: Column to enforce the minimum limit on
+        - condition: Condition to evaluate
+        - limit_pct: Minimum percentage limit for the condition
+        """
+        nonlocal total_bal, removed_loans, data
+        while (data[evaluate_condition(data, column, condition)]['prin_bal'].sum() / total_bal) * 100 < limit_pct and total_bal > total_bal_limit:
+            condition_matched_loans = removed_loans[evaluate_condition(removed_loans, column, condition)]
+            if condition_matched_loans.empty:
+                break
+            loan_to_add_back = condition_matched_loans.sort_values(by=['prin_bal'], ascending=True).iloc[0]
+            
+            # Remove from removed loans and add back to the main dataset
+            removed_loans.drop(loan_to_add_back.name, inplace=True)
+            data = pd.concat([data, pd.DataFrame([loan_to_add_back])], ignore_index=True)
+            
+            # Recalculate total balance
+            total_bal = data['prin_bal'].sum()
+            
+            # Update progress bar
+            if pbar is not None:
+                pbar.update(1)
+
+    def improve_credit_score():
+        """
+        Improve the weighted average credit score by removing low-score loans.
+        """
+        nonlocal total_bal
+        while calculate_weighted_averages(data, {'orig_credit_score': criteria['wa_limits']['orig_credit_score']})['orig_credit_score'] < criteria['wa_limits']['orig_credit_score']:
+            low_credit_loans = data[data['orig_credit_score'] < criteria['wa_limits']['orig_credit_score']]
+            if low_credit_loans.empty:
+                break
+            loan_to_remove = low_credit_loans.sort_values(by=['orig_credit_score', 'prin_bal'], ascending=[True, False]).iloc[0]
+            remove_loan(loan_to_remove)
+
+    def improve_interest_rate():
+        """
+        Improve the weighted average interest rate by removing high-rate loans.
+        """
+        nonlocal total_bal
+        while calculate_weighted_averages(data, {'original_interest_rate': criteria['wa_limits']['original_interest_rate']})['original_interest_rate'] > criteria['wa_limits']['original_interest_rate']:
+            high_rate_loans = data[data['original_interest_rate'] > criteria['wa_limits']['original_interest_rate']]
+            if high_rate_loans.empty:
+                break
+            loan_to_remove = high_rate_loans.sort_values(by=['original_interest_rate', 'prin_bal'], ascending=[False, False]).iloc[0]
+            remove_loan(loan_to_remove)
+
+    # Apply credit score improvement first to meet WA limit
+    improve_credit_score()
+
+    # Apply interest rate improvement
+    improve_interest_rate()
+
+    # Enforce 3rd lien concentration limit
+    if "lien_position_granular" in criteria["concentration_limits"]:
+        third_lien_limit = criteria["concentration_limits"]["lien_position_granular"].get(3, None)
+        if third_lien_limit is not None:
+            enforce_limit("lien_position_granular", 3, third_lien_limit * 100)
+
+    # Enforce 1st lien concentration limit
+    if "lien_position_granular" in criteria["concentration_limits"]:
+        first_lien_limit = criteria["concentration_limits"]["lien_position_granular"].get(1, None)
+        if first_lien_limit is not None:
+            enforce_limit("lien_position_granular", 1, first_lien_limit * 100)
+
+    # Enforce other concentration limits
+    for col, cond_dict in criteria["concentration_limits"].items():
+        for cond, limit_pct in cond_dict.items():
+            enforce_limit(col, cond, limit_pct * 100)
+
+    # Enforce WA limits
+    for metric, target in criteria["wa_limits"].items():
+        while (data[metric] * data['prin_bal']).sum() / total_bal > target and total_bal > total_bal_limit:
+            loan_to_remove = data.sort_values(by=[metric, 'prin_bal'], ascending=(metric != 'orig_credit_score')).iloc[0]
+            remove_loan(loan_to_remove)
+
+    # Continue removing loans to meet total balance limit
+    while total_bal > total_bal_limit:
+        loan_to_remove = data.sort_values(by=['prin_bal'], ascending=False).iloc[0]
+        remove_loan(loan_to_remove)
+
+    return data, removed_loans
+
+def add_loans_back(data, removed_loans, criteria, total_bal_limit):
+    """
+    Attempt to add removed loans back to the dataset while still meeting criteria.
+
+    Parameters:
+    - data: DataFrame containing adjusted loan data
+    - removed_loans: DataFrame containing loans that were removed
+    - criteria: Dictionary specifying criteria for adjustment
+    - total_bal_limit: Absolute principal balance limit
+
+    Returns:
+    - The adjusted data with loans added back where possible
+    """
+    total_bal = data['prin_bal'].sum()
+
+    for _, loan in removed_loans.iterrows():
+        loan_group = loan['loan_group']
+        group_loans = removed_loans[removed_loans['loan_group'] == loan_group]
+
+        potential_data = pd.concat([data, group_loans], ignore_index=True)
+        potential_bal = potential_data['prin_bal'].sum()
+        potential_concentration_percentages = calculate_concentration_percentages(potential_data, criteria['concentration_limits'])
+        potential_wa_metrics = calculate_weighted_averages(potential_data, criteria['wa_limits'])
+
+        # Check if adding back loans satisfies all criteria
+        if (potential_bal <= total_bal_limit and 
+            all(potential_concentration_percentages[f"{col}_{cond}"] <= limit_pct * 100
+                for col, cond_dict in criteria['concentration_limits'].items()
+                for cond, limit_pct in cond_dict.items()) and
+            all(potential_wa_metrics[metric] <= target if 'score' not in metric else potential_wa_metrics[metric] >= target
+                for metric, target in criteria['wa_limits'].items())):
+            
+            # Add loans back if criteria are satisfied
+            data = potential_data
+            total_bal = potential_bal
+
+    return data
+
+# Data Cleaning and Initial Summarization
+# Convert necessary columns to numeric and handle errors
+loan_data['prin_bal'] = pd.to_numeric(loan_data['prin_bal'], errors='coerce')
+loan_data['original_cltv'] = pd.to_numeric(loan_data['original_cltv'], errors='coerce')
+loan_data['orig_credit_score'] = pd.to_numeric(loan_data['orig_credit_score'], errors='coerce')
+loan_data['original_dti_rate'] = pd.to_numeric(loan_data['original_dti_rate'], errors='coerce')
+loan_data['original_interest_rate'] = pd.to_numeric(loan_data['original_interest_rate'], errors='coerce')
+
+# Calculate initial total balance and metrics
+total_initial_bal = loan_data['prin_bal'].sum()
+initial_concentration_percentages = calculate_concentration_percentages(loan_data, criteria['concentration_limits'])
+initial_wa_metrics = calculate_weighted_averages(loan_data, criteria['wa_limits'])
+
+# Print initial dataset summary
+print("Initial Dataset Summary:")
+print(f"Number of Loans: {loan_data.shape[0]}")
+print(f"Total Balance of Included Loans: ${total_initial_bal:,.2f}")
+for metric, value in initial_wa_metrics.items():
+    print(f"Weighted Average {metric.replace('_', ' ').title()}: {value:.4f}")
+
+# Include specific print for lien positions
+print("\nInitial Concentration Percentages:")
+for condition, pct in initial_concentration_percentages.items():
+    print(f"{condition}: {pct:.2f}%")
+
+def calculate_originator_contributions(data):
+    """
+    Calculate contributions of each originator to the total balance.
+
+    Parameters:
+    - data: DataFrame containing loan data
+
+    Returns:
+    - A dictionary with contributions for each originator
+    """
+    originator_balances = data.groupby('originator_name')['prin_bal'].sum()
+    total_balance = data['prin_bal'].sum()
+    return {originator: {"$": balance, "%": f"{(balance / total_balance) * 100:.2f}%"} for originator, balance in originator_balances.items()}
+
+# Uncomment to see initial originator contributions
+# initial_originator_contributions = calculate_originator_contributions(loan_data)
+# print("\nInitial Originator Contributions:")
+# for originator, info in initial_originator_contributions.items():
+#     print(f"{originator}: ${info['$']:,.2f} ({info['%']})")
+
+# Filtered data
+# List of originators to include
+originators_to_include = [
+    'THE_LOAN_STORE', 'CROSS_COUNTRY', 'AXEN_MORTGAGE', 'HOMEBRIDGE_WHOLESALE', 'SYNERGY_ONE', 'CMG_MORTGAGE',
+    'FAIRWAY', 'FIGURE', 'FIGURE_WHOLESALE', 'GUARANTEED_RATE', 'HOMEBRIDGE', 'EVERGREEN_MONEYSOURCE_MORTGAGE_COMPANY',
+    'MOVEMENT', 'NEW_AMERICAN_FUNDING', 'SYNERGY_ONE', 'UNION_HOME_MORTGAGE_CORP', 'MUTUAL_OF_OMAHA_MORTGAGE_INC',
+    'OCMBC_INC','REMN_WHOLESALE',
+]
+
+# Remove loans that are not in first or third lien positions
+filtered_loan_data = loan_data[(loan_data['lien_position_granular'] != 1)]
+filtered_loan_data = filtered_loan_data[(filtered_loan_data['lien_position_granular'] != 3)]
+
+# Further filter by originators to include
+filtered_loan_data = filtered_loan_data[filtered_loan_data['originator_name'].isin(originators_to_include)]
+
+# Calculate concentration percentages and weighted averages for filtered data
+filtered_concentration_percentages = calculate_concentration_percentages(filtered_loan_data, criteria['concentration_limits'])
+filtered_total_initial_bal = filtered_loan_data['prin_bal'].sum()
+filtered_wa_metrics = calculate_weighted_averages(filtered_loan_data, criteria['wa_limits'])
+
+# Print filtered dataset summary before adjustments
+print("\nFiltered Dataset Summary Before Adjustments:")
+print(f"Number of Loans: {filtered_loan_data.shape[0]}")
+print(f"Total Balance of Included Loans: ${filtered_total_initial_bal:,.2f}")
+for metric, value in filtered_wa_metrics.items():
+    print(f"Weighted Average {metric.replace('_', ' ').title()}: {value:.4f}")
+
+print("\nFiltered Initial Concentration Percentages:")
+for condition, pct in filtered_concentration_percentages.items():
+    print(f"{condition}: {pct:.2f}%")
+
+# Uncomment to see filtered originator contributions
+# filtered_originator_contributions = calculate_originator_contributions(filtered_loan_data)
+# print("\nFiltered Originator Contributions:")
+# for originator, info in filtered_originator_contributions.items():
+#     print(f"{originator}: ${info['$']:,.2f} ({info['%']})")
+
+# Adjust data to meet criteria with progress bar
+print("\nAdjusting loans to meet criteria...")
+start_time = time.time()
+
+# Estimate the number of iterations based on the number of rows in the filtered data
+estimated_iterations = len(filtered_loan_data)
+
+# Initial removal and add-back loop
+for i in range(3):  # Perform the removal and add-back process multiple times
+    with tqdm(total=estimated_iterations, desc=f'Processing Loans - Iteration {i+1}', ncols=100) as pbar:
+        adjusted_loan_data, removed_loans = adjust_loans(filtered_loan_data.copy(), criteria, pbar=pbar)
+        adjusted_loan_data = add_loans_back(adjusted_loan_data, removed_loans, criteria, absolute_prin_bal_limit)
+
+# Calculate adjusted weighted averages and concentration percentages
+adjusted_wa_metrics = calculate_weighted_averages(adjusted_loan_data, criteria['wa_limits'])
+adjusted_concentration_percentages = calculate_concentration_percentages(adjusted_loan_data, criteria['concentration_limits'])
+
+# Print adjusted dataset summary
+print("\nAdjusted Dataset Summary:")
+print(f"Number of Loans: {adjusted_loan_data.shape[0]}")
+print(f"Total Balance of Included Loans: ${adjusted_loan_data['prin_bal'].sum():,.2f}")
+for metric, value in adjusted_wa_metrics.items():
+    print(f"Weighted Average {metric.replace('_', ' ').title()}: {value:.4f}")
+
+print("\nAdjusted Concentration Percentages:")
+for condition, pct in adjusted_concentration_percentages.items():
+    print(f"{condition}: {pct:.2f}%")
+
+# Uncomment to see adjusted originator contributions
+# adjusted_originator_contributions = calculate_originator_contributions(adjusted_loan_data)
+# print("\nAdjusted Originator Contributions:")
+# for originator, info in adjusted_originator_contributions.items():
+#     print(f"{originator}: ${info['$']:,.2f} ({info['%']})")
+
+# Calculate removed loan metrics and percentages
+removed_concentration_percentages = calculate_concentration_percentages(removed_loans, criteria['concentration_limits'])
+removed_total_bal = removed_loans['prin_bal'].sum()
+removed_wa_metrics = calculate_weighted_averages(removed_loans, criteria['wa_limits'])
+
+# Print removed loans summary
+print("\nRemoved Loans Summary:")
+print(f"Number of Removed Loans: {removed_loans.shape[0]}")
+print(f"Total Balance of Removed Loans: ${removed_total_bal:,.2f}")
+for metric, value in removed_wa_metrics.items():
+    print(f"Weighted Average {metric.replace('_', ' ').title()}: {value:.4f}")
+
+print("\nRemoved Concentration Percentages:")
+for condition, pct in removed_concentration_percentages.items():
+    print(f"{condition}: {pct:.2f}%")
+
+# Uncomment to see removed originator contributions
+# removed_originator_contributions = calculate_originator_contributions(removed_loans)
+# print("\nRemoved Originator Contributions:")
+# for originator, info in removed_originator_contributions.items():
+#     print(f"{originator}: ${info['$']:,.2f} ({info['%']})")
+
+# Save the adjusted data to a new CSV
+adjusted_loan_data.to_csv('/Users/f1315/Downloads/Adjusted_Piggyback.csv', index=False)
+print("Adjusted loans saved to /Users/f1315/Downloads/Adjusted_Piggyback.csv")
+
+# Save the removed loans to another CSV
+removed_loans.to_csv('/Users/f1315/Downloads/Removed_Piggyback.csv', index=False)
+print("Removed loans saved to /Users/f1315/Downloads/Removed_Piggyback.csv")
+
+# Print elapsed time for the process
+end_time = time.time()
+elapsed_time = end_time - start_time
+print(f"Elapsed time: {elapsed_time:.2f} seconds")
